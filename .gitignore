@@ -1,9 +1,5 @@
 ### node etc ###
 
-# My gitignore
-.github
-.husky
-
 # Logs
 data-node
 meili_data*
