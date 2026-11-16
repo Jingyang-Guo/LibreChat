@@ -34,7 +34,7 @@ const NODE_POLYFILL_SHIMS: Record<string, string> = {
 };
 
 // https://vitejs.dev/config/
-const backendPort = (process.env.BACKEND_PORT && Number(process.env.BACKEND_PORT)) || 3080;
+const backendPort = (process.env.BACKEND_PORT && Number(process.env.BACKEND_PORT)) || 80;
 /** IPv6 hosts arrive unbracketed (valid for the listen address) but must be
  *  bracketed inside a URL, or the proxy target parses as host `:` port soup. */
 const backendHost = process.env.HOST?.includes(':') ? `[${process.env.HOST}]` : process.env.HOST;

@@ -1,3 +1,13 @@
+// CommonJS 和 ES Modules 是 JavaScript 的两套模块化机制
+// CommonJS 使用 require() 导入模块，module.exports 导出模块
+// ES Modules 使用 import 导入模块，export 导出模块
+// Node.js 默认使用 CommonJS，但可以通过 package.json 中的 "type": "module" 或 .mjs 文件启用 ES Modules
+
+// 同一个模块首次使用 require() 加载时，会执行文件顶层的代码（函数定义之外的代码）
+// require() 的返回值是 module.exports 对象
+
+// 加载 .env 中的环境变量至 process.env，同时执行 bootstrapCredentials 函数，将结果加载至进程的缓存中，
+// 同一 Node.js 进程中，成功加载的模块会被缓存，其他文件再次 require 同一个模块，通常直接返回缓存的导出值，不会重新执行文件。
 require('../config/credentials');
 
 const telemetry = require('./telemetry');
@@ -108,28 +118,45 @@ configureFileConfigRegexEngine();
 /** Reject messageFilter PII patterns the RE2 runtime engine cannot compile, at config load. */
 configureMessageFilterRegexValidator();
 
+// ----------------------------------------------------------------------------------------------
 const { PORT, HOST, ALLOW_SOCIAL_LOGIN, DISABLE_COMPRESSION, TRUST_PROXY } = process.env ?? {};
+// 环境变量来源：.env 文件，默认情况下 ALLOW_SOCIAL_LOGIN=false, DISABLE_COMPRESSION=undefined, TRUST_PROXY=1
 
 // Allow PORT=0 to be used for automatic free port assignment
-const port = isNaN(Number(PORT)) ? 3080 : Number(PORT);
+const port = isNaN(Number(PORT)) ? 80 : Number(PORT);
 const host = HOST || 'localhost';
 const trusted_proxy = Number(TRUST_PROXY) || 1; /* trust first proxy by default */
+// ----------------------------------------------------------------------------------------------
 
 const app = express();
 app.locals.codeApiUploadRegistry = createCodeApiUploadRegistry();
+
+// 服务器是否已准备好提供服务的状态变量
 let serverReady = false;
+
+// 调度引擎是启动中、已启用，还是不可用？
+// 下行代码声明 scheduleEngineState 变量的类型为 ScheduleEngineState，该变量只能取值 'starting' | 'armed' | 'unavailable'
 /** @type {import('@librechat/api').ScheduleEngineState} */
 let scheduleEngineState = 'starting';
 
 const SERVER_NOT_READY_CODE = 'SERVER_NOT_READY';
 const CHAT_START_RETRY_AFTER_SECONDS = '1';
 
+// 这段代码是一个 Express 中间件，用于在服务器尚未启动完成时，阻止新的聊天 POST 请求。
 const rejectChatStartsUntilReady = (req, res, next) => {
+  // 以下任意一个条件成立就进入 if
+  // serverReady == true    服务器已就绪，可以继续处理。
+  // req.method !== 'POST'  请求不是 POST，可以继续处理。
+  // req.path === '/abort'  请求是取消生成操作，可以继续处理。
   if (serverReady || req.method !== 'POST' || req.path === '/abort') {
     return next();
+    // return next() 有两个作用：调用 next() 继续处理请求，并通过 return 结束当前函数，避免继续执行下面的拒绝逻辑。
   }
 
+  // 如果不满足上述条件
   res.set('Retry-After', CHAT_START_RETRY_AFTER_SECONDS);
+  // res.status(503)：设置响应状态码。
+  // .json(...)：将 HTTP 响应发送给发起请求的客户端。
   return res.status(503).json({
     code: SERVER_NOT_READY_CODE,
     error: 'Server is still starting. Please retry shortly.',
@@ -137,6 +164,7 @@ const rejectChatStartsUntilReady = (req, res, next) => {
 };
 
 const rejectScheduleWritesUntilReady = createScheduleWriteGate({
+  // getState 是一个函数，调用 getState() 得到 scheduleEngineState
   getState: () => scheduleEngineState,
   retryAfterSeconds: CHAT_START_RETRY_AFTER_SECONDS,
 });
@@ -180,10 +208,16 @@ const configureGenerationStreams = () => {
 };
 
 /** Reserved for the shutdown tasks that run after the generation job manager. */
+// 关闭服务器时，为后续清理工作预留的时间，单位是毫秒
 const SHUTDOWN_TEARDOWN_RESERVE_MS = 10_000;
 
 const startServer = async () => {
+  // 等待 Redis 客户端准备好，再继续执行后面的代码。
   await waitForKeyvRedisClient();
+
+  // 监控功能
+  // metricsMiddleware：中间件，用来记录 HTTP 请求耗时等指标。
+  // metricsRouter：路由，用来向监控系统提供指标数据。
   const { metricsMiddleware, metricsRouter } = createMetrics({
     collectAgentEventActorStorageMetrics: () =>
       runAsSystem(async () => {
@@ -203,21 +237,37 @@ const startServer = async () => {
     logger.warn('[metrics] METRICS_SECRET is not set - /metrics will return 401 for all requests');
   }
 
+  // 运行环境是否是 Bun，Bun 和 Node.js 一样，都可以运行 JavaScript。
   if (typeof Bun !== 'undefined') {
     axios.defaults.headers.common['Accept-Encoding'] = 'gzip';
   }
+
   await connectDb();
 
   logger.info('Connected to MongoDB');
+
+  // 启动一个后台定期检查任务，清理、修复代码执行环境中未完成的操作，Mongoose 是 Node.js 程序操作 MongoDB 数据库的工具库。
   startCodeEnvironmentLifecycleReconciler({ mongoose });
+
+  // 启动搜索索引的后台同步，如果同步失败，就记录错误日志。
+  // 它负责检查、同步 MongoDB 中的消息和会话数据到 MeiliSearch 搜索索引，供聊天记录搜索使用。
   indexSync().catch((err) => {
     logger.error('[indexSync] Background sync failed:', err);
   });
 
+  // 关闭 Express 默认添加的 X-Powered-By 响应头。
+  // 默认情况下，Express 返回的 HTTP 响应可能包含：X-Powered-By: Express，它告诉客户端：“这个服务使用 Express 框架。
   app.disable('x-powered-by');
+
+  // 这行代码告诉 Express：请求经过代理服务器转发时，应该信任多少层代理提供的信息。
+  // 比如部署结构是：用户 → Nginx 代理 → LibreChat，LibreChat 直接连接的是 Nginx，因此它看到的连接来源是 Nginx。用户的真实 IP、最初使用的是 HTTP 还是 HTTPS，通常由代理通过请求头传递。
+  // trusted_proxy 默认是数字 1，表示信任距离应用最近的一跳代理，适用于类似“用户 → Nginx → LibreChat”的结构。
   app.set('trust proxy', trusted_proxy);
 
   /* Registered ahead of every route so health checks carry the headers too. */
+  // 这段代码的作用是：启用一个中间件，为后续请求的响应添加安全相关的 HTTP 响应头。
+  // 如果成功创建了中间件，就通过 app.use() 注册到 Express。之后经过它的请求，响应中就会添加相应的安全头。
+  // 这些响应头是在告诉浏览器应该遵守哪些安全规则。
   const securityHeaders = createSecurityHeaders();
   if (securityHeaders) {
     app.use(securityHeaders);
@@ -235,6 +285,7 @@ const startServer = async () => {
     );
   }
 
+  // 这行代码的作用是：在系统上下文中执行数据库基础数据初始化，并等待它完成。
   await runAsSystem(seedDatabase);
   /* Recover stuck `status: 'pending'` records from a crash mid-render.
    * `runAsSystem` is required — `File` is tenant-isolated and strict
@@ -243,6 +294,8 @@ const startServer = async () => {
   runAsSystem(sweepOrphanedPreviews).catch((err) => {
     logger.error('[sweepOrphanedPreviews] Background sweep failed:', err);
   });
+
+  // 加载项目根目录的 librechat.yaml 配置
   const appConfig = await getAppConfig({ baseOnly: true });
   await configureSubagentTaskRouting(appConfig?.endpoints?.agents?.subagentActivity);
   registerBackgroundTaskShutdown({
@@ -251,6 +304,7 @@ const startServer = async () => {
   configureAgentEventRuntime(appConfig?.endpoints?.agents?.eventDriven);
   warnOnUnreachableDeliveryPaths(appConfig);
   initializeFileStorage(appConfig);
+
   const projectRoot = path.resolve(__dirname, '../..');
   // Plugin hooks execute only when the operator opts in via DEPLOYMENT_PLUGIN_HOOKS;
   // without it, declared hook documents load as parsed-but-inert with a warning.
@@ -292,6 +346,7 @@ const startServer = async () => {
     });
   });
 
+  // 加载路由模块，因为 routes 是一个目录，所以会加载其中的 index.js，路由模块负责定义“什么请求交给什么代码处理”。
   /* Route modules build their rate limiters as they load, so they load only after the
    * startup checks have applied `rateLimits` from librechat.yaml. */
   const routes = require('./routes');
@@ -301,6 +356,8 @@ const startServer = async () => {
 
   // In order to provide support to serving the application in a sub-directory
   // We need to update the base href if the DOMAIN_CLIENT is specified and not the root path
+  // 这段代码的作用是：根据网站地址的路径，修改 HTML 的 <base href>，让网站部署在子路径时，浏览器能正确解析相对地址。
+  // 例如，你的网站部署在：DOMAIN_CLIENT=https://example.com/chat，它会把 HTML 中的 <base href="/"> 改成 <base href="/chat/"></base>
   if (process.env.DOMAIN_CLIENT) {
     const clientUrl = new URL(process.env.DOMAIN_CLIENT);
     const baseHref = clientUrl.pathname.endsWith('/')
@@ -317,6 +374,7 @@ const startServer = async () => {
      request, before there is a caller whose overrides could be resolved, so the
      answer is the deployment's base configuration; `/api/config` resolves the
      caller's and the client prefers it. */
+  // 这段代码的作用是：把页脚相关的初始配置写进 HTML，让浏览器第一次显示页面时，就知道该如何安排页脚和输入框的位置。
   indexHTML = injectConfiguredFooterBootstrap(indexHTML, {
     customFooter: process.env.CUSTOM_FOOTER,
     landingFooter: appConfig?.interfaceConfig?.landingFooter,
@@ -332,6 +390,7 @@ const startServer = async () => {
   const cspPolicy = createCspPolicy();
   const shellCache = shellCacheHeaders(cspPolicy != null);
 
+  // 发送 IndexHtml
   const sendIndexHtml = (req, res) => {
     res.set(shellCache);
     res.vary(QUERY_DEVTOOLS_HEADER);
@@ -494,6 +553,8 @@ const startServer = async () => {
   app.use('/api', apiNotFound);
 
   /** SPA fallback - serve index.html for all unmatched routes */
+  // 兜底路由
+  // http://服务器IP地址
   app.use(createSpaFallback(sendIndexHtml));
 
   /** Record trace errors before the final error controller. */
