@@ -1,7 +1,8 @@
 ### node etc ###
 
-# Github workflow
+# My gitignore
 .github
+.husky
 
 # Logs
 data-node
