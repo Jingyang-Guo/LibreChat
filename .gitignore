@@ -1,5 +1,8 @@
 ### node etc ###
 
+# Github workflow
+.github
+
 # Logs
 data-node
 meili_data*
