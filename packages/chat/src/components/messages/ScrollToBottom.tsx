@@ -52,7 +52,7 @@ const ScrollToBottom: ForwardRefExoticComponent<Props & RefAttributes<HTMLDivEle
         <div
           className={cn(
             'mx-auto flex justify-end sm:px-2',
-            maximizeChatSpace ? 'max-w-full' : 'md:max-w-3xl xl:max-w-4xl',
+            maximizeChatSpace ? 'max-w-full' : 'md:max-w-3xl xl:max-w-3xl',
           )}
         >
           <Button

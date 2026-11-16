@@ -93,7 +93,7 @@ export default function ComposerFrame({
       className={cn(
         'mx-auto flex w-full flex-row gap-3 sm:px-2',
         composerPlacementTransition(),
-        maximizeChatSpace ? 'max-w-full' : 'md:max-w-3xl xl:max-w-4xl',
+        maximizeChatSpace ? 'max-w-full' : 'md:max-w-3xl xl:max-w-3xl',
         clearanceClassName,
       )}
     >
