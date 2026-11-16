@@ -16,6 +16,7 @@ services:
     - "host.docker.internal:host-gateway"
     env_file:
       - .env
+    # .env 中定义的环境变量会被 environment 中定义的环境变量覆盖
     environment:
       - HOST=0.0.0.0
       - NODE_ENV=production

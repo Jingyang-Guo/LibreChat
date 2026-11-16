@@ -10,6 +10,7 @@ export const credentialNames = [
 ] as const;
 
 export type CredentialName = (typeof credentialNames)[number];
+// 联合类型 CredentialName = 'CREDS_KEY' | 'CREDS_IV' | 'JWT_SECRET' | 'JWT_REFRESH_SECRET'
 
 export type CredentialSource = 'environment' | 'temporary';
 
@@ -59,15 +60,25 @@ const legacyCredentialFingerprints: Partial<Record<CredentialName, string[]>> = 
 const legacyJwtCredentialNames = new Set<CredentialName>(['JWT_SECRET', 'JWT_REFRESH_SECRET']);
 
 function rejectLegacyJwtCredential(name: CredentialName, value: string): void {
+  // 如果 name 不是 JWT_SECRET 或者 JWT_REFRESH_SECRET 直接返回
+
+  // 如果 value 是空值，则直接返回；
+  // 如果 value 是非空值，则判断其 SHA-256 指纹是否在 legacyCredentialFingerprints 中，如果不在，则直接返回
   if (!legacyJwtCredentialNames.has(name) || !isLegacyCredential(name, value)) {
     return;
   }
 
+  // name 是 JWT_SECRET 或者 JWT_REFRESH_SECRET，并且 value 的 SHA-256 指纹在 legacyCredentialFingerprints 中，抛出错误。
   throw new Error(
     `[credentials] ${name} uses a retired default value. Configure a unique replacement before starting LibreChat.`,
   );
 }
 
+// globalThis 是一个全局对象，在 Node.js 中，可以通过它保存当前运行环境内共享的数据，生命周期与运行进程一致
+// & 是交叉类型，把两种类型合在一起：
+// typeof globalThis & Record<symbol, CredentialRuntimeState | undefined>
+// 也就是：保留全局对象原有的类型，同时允许按这里声明的类型访问 Symbol 属性
+// const credentialRuntimeKey = Symbol.for('librechat.credentials.runtime');
 function getRuntimeState(): CredentialRuntimeState | undefined {
   const runtime = globalThis as typeof globalThis &
     Record<symbol, CredentialRuntimeState | undefined>;
@@ -80,11 +91,13 @@ function setRuntimeState(state: CredentialRuntimeState): void {
   runtime[credentialRuntimeKey] = state;
 }
 
+// .env 没有设置 tempCredentialPathEnvironment 环境变量，所以 CredentialPath 是 process.cwd()/.env.temp
 function getCredentialPath(): string {
   const configuredPath = process.env[tempCredentialPathEnvironment]?.trim();
   return path.resolve(configuredPath || path.join(process.cwd(), '.env.temp'));
 }
 
+// 输出 {'CREDS_KEY': 'xxxx', 'CREDS_IV': 'xxxx', 'JWT_SECRET': 'xxxx, 'JWT_REFRESH_SECRET': 'xxxx'}
 function parseCredentialFile(contents: string): Partial<Record<CredentialName, string>> {
   return contents.split(/\r?\n/).reduce<Partial<Record<CredentialName, string>>>((values, line) => {
     const match = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
@@ -101,6 +114,11 @@ function parseCredentialFile(contents: string): Partial<Record<CredentialName, s
   }, {});
 }
 
+// interface CredentialFileResult {
+//   values: Partial<Record<CredentialName, string>>;
+//   exists: boolean;
+//   readable: boolean;
+// }
 function readCredentialFile(filePath: string): CredentialFileResult {
   try {
     return {
@@ -109,10 +127,12 @@ function readCredentialFile(filePath: string): CredentialFileResult {
       readable: true,
     };
   } catch (error) {
+    // 文件不存在
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { values: {}, exists: false, readable: true };
     }
 
+    // 文件存在，但无法读取
     console.warn(`[credentials] Unable to read temporary credentials file at ${filePath}.`);
     return { values: {}, exists: true, readable: false };
   }
@@ -145,6 +165,7 @@ function generateCredential(name: CredentialName): string {
   return crypto.randomBytes(name === 'CREDS_IV' ? 16 : 32).toString('hex');
 }
 
+// 判断文件是否是 .env 或者 .env.example
 function isProtectedEnvironmentPath(filePath: string): boolean {
   const basename = path.basename(path.resolve(filePath));
   return basename === '.env' || basename === '.env.example';
@@ -166,11 +187,14 @@ function hasUsableCredentialValues(filePath: string, names: CredentialName[]): b
 }
 
 function writeCredentialFile(
+  // 原始变量名称：filePath, temporaryValues, file.exists, generated
+  // filePath 通常是 process.cwd()/.env.temp
   filePath: string,
   values: Partial<Record<CredentialName, string>>,
   overwrite: boolean,
   generatedNames: CredentialName[],
 ): CredentialFileWriteResult {
+  // 如果 filePath 的文件是 .env 或者 .env.example，则返回 failed
   if (isProtectedEnvironmentPath(filePath)) {
     return 'failed';
   }
@@ -179,11 +203,15 @@ function writeCredentialFile(
   const lockPath = `${filePath}.lock`;
   let ownsLock = false;
   try {
+    // 确保 filePath 文件的父目录存在
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(temporaryPath, serializeCredentialFile(values), { mode: 0o600 });
 
+    // filePath 文件是否存在？
+    // filePath 存在
     if (overwrite) {
       try {
+        // 为 temporaryPath 创建一个硬链接 lockPath
         fs.linkSync(temporaryPath, lockPath);
         ownsLock = true;
       } catch (error) {
@@ -201,11 +229,13 @@ function writeCredentialFile(
         return hasUsableCredentialValues(filePath, generatedNames) ? 'exists' : 'failed';
       }
 
+      // 如果 filePath 可读且已有 generatedNames 对应的值，那么则返回 exists
       if (hasUsableCredentialValues(filePath, generatedNames)) {
         return 'exists';
       }
       fs.renameSync(temporaryPath, filePath);
     } else {
+      // filePath 不存在
       try {
         fs.linkSync(temporaryPath, filePath);
       } catch (error) {
@@ -273,17 +303,34 @@ function adoptCredentialFile(
   return true;
 }
 
+// 核心函数
 export function bootstrapCredentials(): CredentialRuntimeState {
+  // export interface CredentialRuntimeState {
+  //   filePath: string;
+  //   sources: Record<CredentialName, CredentialSource>;
+  //   generated: CredentialName[];
+  //   loadedFromFile: CredentialName[];
+  //   missingFromEnvironment: CredentialName[];
+  //   persistenceFailed: boolean;
+  // }
+
+  // 读取全局状态，如果已经存在，则返回的类型是 CredentialRuntimeState，否则返回 undefined
   const existingState = getRuntimeState();
   if (existingState) {
     return existingState;
   }
 
+  // getRuntimeState() 返回 undefined，则继续执行下述代码
   // Validate explicit credentials before generating or adopting any missing values.
+  // 检查环境变量中是否存在 CREDS_KEY 和 CREDS_IV，如果存在，则检查其长度是否符合要求
+  // CREDS_KEY 必须是 64 个十六进制字符，CREDS_IV 必须是 32 个十六进制字符，如果存在但不符合要求，则抛出错误，阻止启动。
   for (const name of ['CREDS_KEY', 'CREDS_IV'] as const) {
     const value = process.env[name];
+    // 如果 value 不是空值，但同时 value 的长度不符合要求
     if (isConfiguredCredential(value) && !isUsableTemporaryCredential(name, value)) {
       const bytes = name === 'CREDS_KEY' ? 32 : 16;
+
+      // throw new Error(...) 会立即中断当前执行路径，后面的代码不会继续执行，并将错误沿调用栈向上传递。
       throw new Error(
         `[credentials] ${name} must be exactly ${bytes * 2} hexadecimal characters (${bytes} bytes). ` +
           'Refusing startup to prevent weak encryption or late crypto failures. ' +
@@ -292,25 +339,53 @@ export function bootstrapCredentials(): CredentialRuntimeState {
     }
   }
 
+  // 环境变量中没有 CREDS_KEY 或者 CREDS_IV，或者它们的长度符合要求
+
+  // filePath = process.cwd()/.env.temp
   const filePath = getCredentialPath();
+
+  // 文件存在，读取正常：return { values: -, exists: true, readable: true }
+  // values 是完整的或不完整的 {'CREDS_KEY': 'xxxx', 'CREDS_IV': 'xxxx', 'JWT_SECRET': 'xxxx, 'JWT_REFRESH_SECRET': 'xxxx'}
+  // 文件存在，但无法读取：return { values: {}, exists: true, readable: false };
+  // 文件不存在：return { values: {}, exists: false, readable: true };
   const file = readCredentialFile(filePath);
+
   const sources = {} as Record<CredentialName, CredentialSource>;
   const generated: CredentialName[] = [];
   const loadedFromFile: CredentialName[] = [];
   const missingFromEnvironment: CredentialName[] = [];
   const temporaryValues: Partial<Record<CredentialName, string>> = {};
 
+  // export interface CredentialRuntimeState {
+  //   filePath: string;
+  //   sources: Record<CredentialName, CredentialSource>;
+  //   generated: CredentialName[];
+  //   loadedFromFile: CredentialName[];
+  //   missingFromEnvironment: CredentialName[];
+  //   persistenceFailed: boolean;
+  // }
+
   for (const name of credentialNames) {
     const environmentValue = process.env[name];
+    // 针对某一个 name，如果非空
     if (isConfiguredCredential(environmentValue)) {
+      // 如果 name 是 JWT_SECRET 或者 JWT_REFRESH_SECRET，并且 value 的 SHA-256 指纹在 legacyCredentialFingerprints 中，抛出错误。
       rejectLegacyJwtCredential(name, environmentValue);
+
+      // value 是非空值，而且其 SHA-256 指纹不在 legacyCredentialFingerprints 中，满足条件
       sources[name] = 'environment';
       continue;
     }
 
+    // 环境变量中没有 name 对应的值
+    // push() 的作用是：把一个元素添加到数组末尾
     missingFromEnvironment.push(name);
+
+    // 检查之前读取的 .env.temp 文件中是否存在 name 对应的值
     const fileValue = file.values[name];
+    // 如果文件中存在 name 对应的值，并且其长度符合要求
     if (isUsableTemporaryCredential(name, fileValue)) {
+      // 如果 name 是 JWT_SECRET 或者 JWT_REFRESH_SECRET，并且 value 的 SHA-256 指纹在 legacyCredentialFingerprints 中，抛出错误。
       rejectLegacyJwtCredential(name, fileValue);
       process.env[name] = fileValue;
       sources[name] = 'temporary';
@@ -319,6 +394,7 @@ export function bootstrapCredentials(): CredentialRuntimeState {
       continue;
     }
 
+    // 临时文件中没有 name 对应的值，或者其长度不符合要求
     const generatedValue = generateCredential(name);
     process.env[name] = generatedValue;
     sources[name] = 'temporary';
@@ -327,6 +403,7 @@ export function bootstrapCredentials(): CredentialRuntimeState {
   }
 
   let persistenceFailed = false;
+  // 如果 generated.length > 0 && .env.temp 存在且读取正常或者文件不存在
   if (generated.length > 0 && file.readable) {
     const writeResult = writeCredentialFile(filePath, temporaryValues, file.exists, generated);
     if (writeResult === 'exists') {
@@ -340,8 +417,10 @@ export function bootstrapCredentials(): CredentialRuntimeState {
       persistenceFailed = writeResult === 'failed';
     }
   } else if (generated.length > 0) {
+    // 如果 generated.length > 0，文件存在但读取不正常
     persistenceFailed = true;
   } else if (loadedFromFile.length > 0) {
+    // 如果 generated.length == 0，但是 loadedFromFile.length > 0
     hardenCredentialFile(filePath);
   }
 
@@ -355,6 +434,7 @@ export function bootstrapCredentials(): CredentialRuntimeState {
   };
   setRuntimeState(state);
 
+  // 打印信息
   if (generated.length > 0 && !persistenceFailed) {
     console.warn(
       `[credentials] Generated temporary credentials for ${generated.join(', ')}. ` +
@@ -386,6 +466,8 @@ export function getCredentialRuntimeState(): CredentialRuntimeState | undefined 
   return getRuntimeState();
 }
 
+// 将凭据字符串计算成 SHA-256 指纹，用于比较和识别凭据。
+// 输入是字符串或 undefined，输出是 64 个十六进制字符组成的字符串。
 function fingerprintCredential(value: string | undefined): string {
   return crypto
     .createHash('sha256')
@@ -402,11 +484,15 @@ export function getCredentialFingerprints(
   }, {} as CredentialFingerprintRecord);
 }
 
+// 如果 value 是空值，则直接返回 false；
+// 如果 value 是非空值，则判断其 SHA-256 指纹是否在 legacyCredentialFingerprints 中，如果在，则返回 true，否则返回 false。
 export function isLegacyCredential(name: CredentialName, value: string | undefined): boolean {
+  // 如果 value 是空值，则直接返回 false
   if (!value) {
     return false;
   }
 
+  // fingerprintCredential(value) 将凭据字符串计算成 SHA-256 指纹，用于比较和识别凭据。
   return legacyCredentialFingerprints[name]?.includes(fingerprintCredential(value)) ?? false;
 }
 
