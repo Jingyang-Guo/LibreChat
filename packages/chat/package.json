@@ -49,9 +49,7 @@
   ],
   "scripts": {
     "clean": "rimraf dist",
-    "b:clean": "bun run rimraf dist",
     "build": "npm run clean && tsdown",
-    "b:build": "bun run b:clean && bun run tsdown",
     "build:watch": "tsdown --watch",
     "typecheck": "node ../../scripts/typecheck.mts && node ../../scripts/typecheck.mts -p test/tsconfig.json",
     "test": "jest",
